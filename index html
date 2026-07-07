@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Playbook de Gestao -- Clinicas</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- SIDEBAR -->
+<aside class="crm-sidebar">
+  <div class="sb-logo">
+    <div class="sb-logo-mark">CRM</div>
+    <div class="sb-logo-title">Playbook de Gestão</div>
+  </div>
+  <div class="sb-sec">Clínicas</div>
+  <nav class="sb-nav">
+    <div id="clinicTabs"></div>
+    <div id="sbSlot"></div>
+  </nav>
+</aside>
+
+<!-- MAIN -->
+<div class="crm-main">
+  <div class="crm-topbar">
+    <div class="topbar-title" id="topbarTitle">
+      <span style="color:var(--muted);font-weight:400;">Selecione uma clínica</span>
+    </div>
+    <div class="topbar-right" id="topbarRight"></div>
+  </div>
+  <div class="crm-content list-mode" id="crmContent">
+    <div id="clinicPanel"></div>
+    <div class="footnote">Dados salvos no navegador (localStorage + IndexedDB). Arquivos anexados não são enviados a nenhum servidor. Ao abrir em outro dispositivo os dados não estarão disponíveis.</div>
+  </div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-bd hidden" id="taskModal">
+  <div class="modal">
+    <div class="modal-hd">
+      <span class="modal-title">Detalhes da Tarefa</span>
+      <button class="modal-x" id="modalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="f-grp">
+        <label class="f-lbl">Nome da Tarefa</label>
+        <input type="text" class="f-inp" id="modalName" placeholder="Descreva a tarefa">
+      </div>
+      <div class="f-grp">
+        <label class="f-lbl">Etapa</label>
+        <div class="stage-row" id="modalStageRow"></div>
+      </div>
+      <div class="f-grp">
+        <label class="f-lbl">Subtarefas</label>
+        <div id="mSubList" class="m-sub-list"></div>
+        <div class="m-sub-add">
+          <input type="text" class="m-sub-inp" id="mSubInp" placeholder="Nova subtarefa...">
+          <button class="m-sub-btn" id="mSubAdd">+ Adicionar</button>
+        </div>
+      </div>
+      <div class="f-grp">
+        <label class="f-lbl">Responsável</label>
+        <input type="text" class="f-inp" id="modalOwner" placeholder="Ex: Ana, Dr. Raul...">
+      </div>
+      <div class="f-grp">
+        <label class="f-lbl">Prioridade</label>
+        <select class="f-inp f-sel" id="modalPriority">
+          <option value="">— Sem prioridade —</option>
+          <option value="alta">🔴 Alta</option>
+          <option value="media">🟡 Média</option>
+          <option value="baixa">🟢 Baixa</option>
+        </select>
+      </div>
+      <div class="f-grp">
+        <label class="f-lbl">Prazo</label>
+        <input type="date" class="f-inp" id="modalDue">
+      </div>
+      <div class="f-grp">
+        <label class="f-lbl">Observações</label>
+        <textarea class="f-inp f-ta" id="modalNotes" placeholder="Anotações, detalhes, links..."></textarea>
+      </div>
+      <div class="f-grp">
+        <label class="f-lbl">Anexos</label>
+        <div id="mAttList" class="m-att-list"></div>
+        <label class="m-att-btn">📎 Adicionar Arquivo<input type="file" id="mAttInp" style="display:none"></label>
+      </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn-sec" id="modalCancel">Cancelar</button>
+      <button class="btn" id="modalSave">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
