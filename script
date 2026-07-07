@@ -1,0 +1,654 @@
+
+// ══════════════════════════════════════════
+// ETAPAS
+// ══════════════════════════════════════════
+const STAGES=[
+  {id:'backlog',     label:'A Fazer',     icon:'○'},
+  {id:'analysis',   label:'Em Análise',  icon:'◑'},
+  {id:'in_progress',label:'Em Execução', icon:'◕'},
+  {id:'review',     label:'Em Revisão',  icon:'◔'},
+  {id:'done',       label:'Concluído',   icon:'●'},
+];
+const SIDS=STAGES.map(s=>s.id);
+const sLabel=id=>STAGES.find(s=>s.id===id)?.label||id;
+const sIcon =id=>STAGES.find(s=>s.id===id)?.icon||'○';
+
+// ══════════════════════════════════════════
+// DB
+// ══════════════════════════════════════════
+const LS_KEY='playbookCRM_v3';
+const DB_NAME='playbookAnexosDB';
+const DB_STORE='anexos';
+let db=null;
+
+function openDB(){
+  return new Promise((res,rej)=>{
+    const r=indexedDB.open(DB_NAME,1);
+    r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains(DB_STORE))r.result.createObjectStore(DB_STORE,{keyPath:'id'});};
+    r.onsuccess=()=>{db=r.result;res(db);};
+    r.onerror=()=>rej(r.error);
+  });
+}
+function dbSave(id,blob,filename,type){return new Promise((res,rej)=>{const tx=db.transaction(DB_STORE,'readwrite');tx.objectStore(DB_STORE).put({id,blob,filename,type});tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error);});}
+function dbGet(id){return new Promise((res,rej)=>{const tx=db.transaction(DB_STORE,'readonly');const r=tx.objectStore(DB_STORE).get(id);r.onsuccess=()=>res(r.result||null);r.onerror=()=>rej(r.error);});}
+function dbDel(id){return new Promise((res,rej)=>{const tx=db.transaction(DB_STORE,'readwrite');tx.objectStore(DB_STORE).delete(id);tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error);});}
+
+// ══════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════
+function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,8);}
+function loadState(){
+  const raw=localStorage.getItem(LS_KEY);
+  if(raw){try{return JSON.parse(raw);}catch(e){}}
+  // try migrate v2
+  const old=localStorage.getItem('playbookGestaoClinicas_v2')||localStorage.getItem('playbookGestaoClinicas_v1');
+  if(old){try{
+    const o=JSON.parse(old);
+    (o.clinics||[]).forEach(c=>{Object.values(c.months||{}).forEach(m=>{(m.tasks||[]).forEach(t=>{if(!t.stage)t.stage=t.status==='feito'?'done':'backlog';if(!t.subtasks)t.subtasks=[];});});});
+    return {...o,viewMode:o.viewMode||{}};
+  }catch(e){}}
+  return {clinics:[],selectedClinicId:null,selectedMonthByClinic:{},hideDoneByClinic:{},viewMode:{},expandedSubs:{}};
+}
+function saveState(){localStorage.setItem(LS_KEY,JSON.stringify(state));}
+let state=loadState();
+
+// ══════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════
+const cur=()=>state.clinics.find(c=>c.id===state.selectedClinicId)||null;
+function monthLabel(k){const[y,m]=k.split('-');return ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][+m-1]+' '+y;}
+function nowMonth(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;}
+function fmtBytes(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB';}
+function esc(s){const d=document.createElement('div');d.innerText=s||'';return d.innerHTML;}
+function getView(){const c=cur();return c?(state.viewMode[c.id]||'list'):'list';}
+function newTask(name,stage='backlog'){return {id:uid(),name:name||'',stage,status:stage==='done'?'feito':'pendente',subtasks:[],attachments:[],owner:'',priority:'',due:'',notes:''};}
+function newSub(name){return {id:uid(),name:name||'',done:false};}
+
+// ══════════════════════════════════════════
+// CLÍNICAS
+// ══════════════════════════════════════════
+function addClinic(nome){
+  nome=(nome||'').trim();if(!nome)return;
+  const id=uid();
+  state.clinics.push({id,name:nome,months:{}});
+  state.selectedClinicId=id;
+  saveState();render();
+}
+function delClinic(id){
+  const c=state.clinics.find(x=>x.id===id);if(!c)return;
+  if(!confirm(`Remover "${c.name}"? Todos os dados serão apagados.`))return;
+  state.clinics=state.clinics.filter(x=>x.id!==id);
+  if(state.selectedClinicId===id)state.selectedClinicId=state.clinics[0]?.id||null;
+  delete state.selectedMonthByClinic[id];
+  saveState();render();
+}
+function selClinic(id){state.selectedClinicId=id;saveState();render();}
+
+// ══════════════════════════════════════════
+// MESES
+// ══════════════════════════════════════════
+function sortedMonths(c){return Object.keys(c.months).sort();}
+function addMonth(clinicId,key){
+  const c=state.clinics.find(x=>x.id===clinicId);if(!c)return;
+  if(!c.months[key])c.months[key]={tasks:[]};
+  state.selectedMonthByClinic[clinicId]=key;
+  saveState();render();
+}
+function selMonth(clinicId,key){state.selectedMonthByClinic[clinicId]=key;saveState();render();}
+function dupMonth(clinicId){
+  const c=state.clinics.find(x=>x.id===clinicId);if(!c)return;
+  const cur_key=state.selectedMonthByClinic[clinicId];
+  const prev=sortedMonths(c).filter(m=>m<cur_key);
+  if(!prev.length){alert('Nenhum mês anterior encontrado.');return;}
+  const src=c.months[prev[prev.length-1]];
+  const dst=c.months[cur_key];
+  if(dst.tasks.length&&!confirm('Mês atual já tem tarefas. Adicionar mesmo assim?'))return;
+  src.tasks.forEach(t=>{dst.tasks.push(newTask(t.name,'backlog'));});
+  saveState();render();
+}
+
+// ══════════════════════════════════════════
+// TAREFAS
+// ══════════════════════════════════════════
+function addTask(clinicId,key,name,stage='backlog'){
+  name=(name||'').trim();if(!name)return;
+  const c=state.clinics.find(x=>x.id===clinicId);
+  c.months[key].tasks.push(newTask(name,stage));
+  saveState();render();
+}
+function delTask(clinicId,key,taskId){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const m=c.months[key];
+  const t=m.tasks.find(x=>x.id===taskId);if(!t)return;
+  if(!confirm(`Remover "${t.name}"?`))return;
+  (t.attachments||[]).forEach(a=>dbDel(a.id));
+  m.tasks=m.tasks.filter(x=>x.id!==taskId);
+  saveState();render();
+}
+function advanceStage(clinicId,key,taskId){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const t=c.months[key].tasks.find(x=>x.id===taskId);
+  const i=SIDS.indexOf(t.stage||'backlog');
+  t.stage=SIDS[(i+1)%SIDS.length];
+  t.status=t.stage==='done'?'feito':'pendente';
+  saveState();render();
+}
+function moveStage(clinicId,key,taskId,dir){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const t=c.months[key].tasks.find(x=>x.id===taskId);
+  const i=SIDS.indexOf(t.stage||'backlog');
+  const ni=i+dir;if(ni<0||ni>=SIDS.length)return;
+  t.stage=SIDS[ni];t.status=t.stage==='done'?'feito':'pendente';
+  saveState();render();
+}
+function editTaskName(clinicId,key,taskId,name){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  c.months[key].tasks.find(x=>x.id===taskId).name=name;
+  saveState();
+}
+function toggleHideDone(clinicId){state.hideDoneByClinic[clinicId]=!state.hideDoneByClinic[clinicId];saveState();render();}
+function toggleSubExpand(taskId){
+  state.expandedSubs=state.expandedSubs||{};
+  state.expandedSubs[taskId]=!state.expandedSubs[taskId];
+  saveState();render();
+}
+
+// ══════════════════════════════════════════
+// SUBTAREFAS
+// ══════════════════════════════════════════
+function addSub(clinicId,key,taskId,name){
+  name=(name||'').trim();if(!name)return;
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const t=c.months[key].tasks.find(x=>x.id===taskId);
+  if(!t.subtasks)t.subtasks=[];
+  t.subtasks.push(newSub(name));
+  state.expandedSubs=state.expandedSubs||{};
+  state.expandedSubs[taskId]=true;
+  saveState();render();
+}
+function toggleSub(clinicId,key,taskId,subId){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const t=c.months[key].tasks.find(x=>x.id===taskId);
+  const s=t.subtasks.find(x=>x.id===subId);
+  s.done=!s.done;saveState();render();
+}
+function delSub(clinicId,key,taskId,subId){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const t=c.months[key].tasks.find(x=>x.id===taskId);
+  t.subtasks=t.subtasks.filter(x=>x.id!==subId);
+  saveState();render();
+}
+function editSubName(clinicId,key,taskId,subId,name){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const t=c.months[key].tasks.find(x=>x.id===taskId);
+  t.subtasks.find(x=>x.id===subId).name=name;
+  saveState();
+}
+
+// ══════════════════════════════════════════
+// ANEXOS
+// ══════════════════════════════════════════
+async function attachFile(clinicId,key,taskId,file){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const t=c.months[key].tasks.find(x=>x.id===taskId);
+  const id=uid();await dbSave(id,file,file.name,file.type);
+  if(!t.attachments)t.attachments=[];
+  t.attachments.push({id,filename:file.name,size:file.size,type:file.type});
+  saveState();
+}
+async function openAtt(id){
+  const r=await dbGet(id);if(!r){alert('Arquivo não encontrado.');return;}
+  const url=URL.createObjectURL(r.blob);window.open(url,'_blank');
+  setTimeout(()=>URL.revokeObjectURL(url),60000);
+}
+function removeAtt(clinicId,key,taskId,attId){
+  const c=state.clinics.find(x=>x.id===clinicId);
+  const t=c.months[key].tasks.find(x=>x.id===taskId);
+  if(!confirm('Remover anexo?'))return;
+  dbDel(attId);t.attachments=t.attachments.filter(a=>a.id!==attId);
+  saveState();
+}
+
+// ══════════════════════════════════════════
+// MODAL
+// ══════════════════════════════════════════
+let mCtx={cid:null,key:null,tid:null};
+
+function openModal(cid,key,tid){
+  mCtx={cid,key,tid};
+  const c=state.clinics.find(x=>x.id===cid);
+  const t=c.months[key].tasks.find(x=>x.id===tid);
+  document.getElementById('modalName').value=t.name||'';
+  document.getElementById('modalOwner').value=t.owner||'';
+  document.getElementById('modalPriority').value=t.priority||'';
+  document.getElementById('modalDue').value=t.due||'';
+  document.getElementById('modalNotes').value=t.notes||'';
+  renderModalStage(t.stage||'backlog');
+  renderModalSubs(t);
+  renderModalAtts(t);
+  document.getElementById('taskModal').classList.remove('hidden');
+  document.getElementById('modalName').focus();
+}
+function closeModal(){document.getElementById('taskModal').classList.add('hidden');}
+function saveModal(){
+  const {cid,key,tid}=mCtx;
+  const c=state.clinics.find(x=>x.id===cid);
+  const t=c.months[key].tasks.find(x=>x.id===tid);
+  const name=document.getElementById('modalName').value.trim();
+  if(name)t.name=name;
+  t.owner=document.getElementById('modalOwner').value.trim();
+  t.priority=document.getElementById('modalPriority').value;
+  t.due=document.getElementById('modalDue').value;
+  t.notes=document.getElementById('modalNotes').value.trim();
+  const sel=document.querySelector('.st-opt[data-sel="1"]');
+  if(sel){t.stage=sel.dataset.stage;t.status=t.stage==='done'?'feito':'pendente';}
+  saveState();closeModal();render();
+}
+function renderModalStage(active){
+  document.getElementById('modalStageRow').innerHTML=STAGES.map(s=>`
+    <div class="st-opt ${s.id===active?'st-sel-'+s.id:''}" data-stage="${s.id}" data-sel="${s.id===active?1:0}"
+      onclick="selectModalStage('${s.id}')">${s.icon} ${s.label}</div>`).join('');
+}
+function selectModalStage(id){
+  document.querySelectorAll('.st-opt').forEach(el=>{
+    const match=el.dataset.stage===id;
+    el.dataset.sel=match?'1':'0';
+    el.className='st-opt'+(match?' st-sel-'+id:'');
+  });
+}
+function renderModalSubs(t){
+  const subs=t.subtasks||[];
+  document.getElementById('mSubList').innerHTML=subs.map(s=>`
+    <div class="m-sub-row ${s.done?'msub-done':''}">
+      <input type="checkbox" class="m-sub-chk" ${s.done?'checked':''} onchange="mSubToggle('${s.id}')">
+      <input type="text" class="m-sub-name" value="${esc(s.name)}" onchange="mSubEdit('${s.id}',this.value)" onblur="mSubEdit('${s.id}',this.value)">
+      <span class="m-sub-del" onclick="mSubDel('${s.id}')">✕</span>
+    </div>`).join('');
+}
+function mSubToggle(subId){
+  const {cid,key,tid}=mCtx;
+  const c=state.clinics.find(x=>x.id===cid);
+  const t=c.months[key].tasks.find(x=>x.id===tid);
+  const s=t.subtasks.find(x=>x.id===subId);s.done=!s.done;
+  saveState();renderModalSubs(t);
+}
+function mSubEdit(subId,name){
+  const {cid,key,tid}=mCtx;
+  const c=state.clinics.find(x=>x.id===cid);
+  const t=c.months[key].tasks.find(x=>x.id===tid);
+  t.subtasks.find(x=>x.id===subId).name=name;saveState();
+}
+function mSubDel(subId){
+  const {cid,key,tid}=mCtx;
+  const c=state.clinics.find(x=>x.id===cid);
+  const t=c.months[key].tasks.find(x=>x.id===tid);
+  t.subtasks=t.subtasks.filter(x=>x.id!==subId);
+  saveState();renderModalSubs(t);
+}
+function mSubAddFromBtn(){
+  const inp=document.getElementById('mSubInp');
+  const name=(inp.value||'').trim();if(!name)return;
+  const {cid,key,tid}=mCtx;
+  const c=state.clinics.find(x=>x.id===cid);
+  const t=c.months[key].tasks.find(x=>x.id===tid);
+  if(!t.subtasks)t.subtasks=[];
+  t.subtasks.push(newSub(name));
+  saveState();renderModalSubs(t);
+  inp.value='';inp.focus();
+}
+function renderModalAtts(t){
+  document.getElementById('mAttList').innerHTML=(t.attachments||[]).map(a=>`
+    <div class="m-att-item">
+      <span class="m-att-name" onclick="openAtt('${a.id}')">📎 ${esc(a.filename)} <span style="color:var(--muted);font-weight:400;">(${fmtBytes(a.size)})</span></span>
+      <span class="m-att-rm" onclick="mAttRm('${a.id}')">✕</span>
+    </div>`).join('');
+}
+function mAttRm(attId){
+  const {cid,key,tid}=mCtx;
+  removeAtt(cid,key,tid,attId);
+  const c=state.clinics.find(x=>x.id===cid);
+  renderModalAtts(c.months[key].tasks.find(x=>x.id===tid));
+}
+
+document.getElementById('modalClose').onclick=closeModal;
+document.getElementById('modalCancel').onclick=closeModal;
+document.getElementById('modalSave').onclick=saveModal;
+document.getElementById('taskModal').addEventListener('click',e=>{if(e.target===document.getElementById('taskModal'))closeModal();});
+document.getElementById('modalName').addEventListener('keydown',e=>{if(e.key==='Enter')saveModal();});
+document.getElementById('mSubAdd').onclick=mSubAddFromBtn;
+document.getElementById('mSubInp').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();mSubAddFromBtn();}});
+document.getElementById('mAttInp').addEventListener('change',async function(){
+  if(!this.files||!this.files[0])return;
+  const {cid,key,tid}=mCtx;
+  await attachFile(cid,key,tid,this.files[0]);
+  const c=state.clinics.find(x=>x.id===cid);
+  renderModalAtts(c.months[key].tasks.find(x=>x.id===tid));
+  this.value='';
+});
+
+// ══════════════════════════════════════════
+// VIEW MODE
+// ══════════════════════════════════════════
+function setView(mode){
+  const c=cur();if(!c)return;
+  state.viewMode[c.id]=mode;saveState();
+  document.getElementById('crmContent').className=mode==='kanban'?'crm-content kanban-mode':'crm-content list-mode';
+  render();
+}
+
+// ══════════════════════════════════════════
+// RENDER
+// ══════════════════════════════════════════
+function render(){renderSidebar();renderTopbar();renderPanel();}
+
+function renderSidebar(){
+  // tabs
+  const tabs=document.getElementById('clinicTabs');
+  tabs.innerHTML=state.clinics.map(c=>{
+    const active=c.id===state.selectedClinicId?'active':'';
+    return `<div class="clinic-tab ${active}" data-cid="${c.id}">
+      <div class="ti"><div class="dot"></div><span class="tn">${esc(c.name)}</span></div>
+      <span class="del-x" data-delcid="${c.id}" title="Remover">✕</span>
+    </div>`;
+  }).join('');
+
+  // slot
+  const slot=document.getElementById('sbSlot');
+  if(state.showNewClinic){
+    slot.innerHTML=`<div class="sb-inline" style="padding:10px 0 14px;">
+      <input type="text" class="sb-input" id="sbClinicInp" placeholder="Nome da clínica" autocomplete="off">
+      <div class="sb-row">
+        <button class="sb-btn" id="sbClinicOk">Adicionar</button>
+        <button class="sb-btn-sec" id="sbClinicCx">✕</button>
+      </div>
+    </div>`;
+    const inp=document.getElementById('sbClinicInp');
+    inp.focus();
+    inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();doAddClinic();}});
+    document.getElementById('sbClinicOk').onclick=doAddClinic;
+    document.getElementById('sbClinicCx').onclick=()=>{state.showNewClinic=false;renderSidebar();};
+  } else {
+    slot.innerHTML=`<button class="add-clinic-btn" id="btnNewClinic"><span style="font-size:16px;line-height:1;">+</span> Nova Clínica</button>`;
+    document.getElementById('btnNewClinic').onclick=()=>{state.showNewClinic=true;renderSidebar();};
+  }
+
+  // tab click delegation
+  document.getElementById('clinicTabs').onclick=e=>{
+    const delBtn=e.target.closest('[data-delcid]');
+    if(delBtn){e.stopPropagation();delClinic(delBtn.dataset.delcid);return;}
+    const tab=e.target.closest('[data-cid]');
+    if(tab)selClinic(tab.dataset.cid);
+  };
+}
+
+function doAddClinic(){
+  const inp=document.getElementById('sbClinicInp');
+  const name=(inp?.value||'').trim();
+  state.showNewClinic=false;
+  addClinic(name);
+}
+
+function renderTopbar(){
+  const c=cur();
+  const titleEl=document.getElementById('topbarTitle');
+  const rightEl=document.getElementById('topbarRight');
+  if(!c){titleEl.innerHTML=`<span style="color:var(--muted);font-weight:400;">Selecione uma clínica</span>`;rightEl.innerHTML='';return;}
+  const key=state.selectedMonthByClinic[c.id];
+  titleEl.innerHTML=`<span style="font-weight:600;">${esc(c.name)}</span>${key?`<span class="topbar-sep">/</span><span class="topbar-month">${monthLabel(key)}</span>`:''}`;
+  const vm=getView();
+  rightEl.innerHTML=`<div class="view-toggle">
+    <button class="vbtn ${vm==='list'?'active':''}" onclick="setView('list')">☰ Lista</button>
+    <button class="vbtn ${vm==='kanban'?'active':''}" onclick="setView('kanban')">⊞ Kanban</button>
+  </div>`;
+}
+
+function renderPanel(){
+  const el=document.getElementById('clinicPanel');
+  const c=cur();
+  if(!c){el.innerHTML=`<div class="empty-state"><div class="empty-icon">🏥</div><div class="empty-title">Nenhuma clínica cadastrada</div>Clique em <strong>+ Nova Clínica</strong> na barra lateral para começar.</div>`;return;}
+
+  const months=sortedMonths(c);
+  if(!state.selectedMonthByClinic[c.id]&&months.length)state.selectedMonthByClinic[c.id]=months[months.length-1];
+  const key=state.selectedMonthByClinic[c.id];
+  const opts=months.map(m=>`<option value="${m}" ${m===key?'selected':''}>${monthLabel(m)}</option>`).join('');
+
+  let html=`<div class="month-bar">
+    <div class="mb-left">
+      ${months.length?`<select class="sel-field" id="mSel" onchange="selMonth('${c.id}',this.value)">${opts}</select>`:`<span style="color:var(--muted);font-size:12px;">Nenhum mês criado</span>`}
+      <input type="month" id="mInp" value="${nowMonth()}" style="width:auto;">
+      <button class="btn" onclick="addMonthFromUI('${c.id}')">+ Mês</button>
+    </div>
+    ${months.length?`<div class="mb-right"><button class="btn-sec" onclick="dupMonth('${c.id}')">⧉ Copiar mês anterior</button></div>`:''}
+  </div>`;
+
+  if(!key){
+    html+=`<div class="empty-state"><div class="empty-icon">📅</div><div class="empty-title">Nenhum mês selecionado</div>Crie ou selecione um mês acima.</div>`;
+    el.innerHTML=html;return;
+  }
+
+  const m=c.months[key];
+  const total=m.tasks.length;
+  const byS={};SIDS.forEach(s=>{byS[s]=m.tasks.filter(t=>(t.stage||'backlog')===s).length;});
+  const done=byS['done'];
+  const pct=total?Math.round(done/total*100):0;
+
+  html+=`<div class="stats-row">
+    <div class="stat-card sc-backlog"><span class="stat-lbl">A Fazer</span><span class="stat-val">${byS['backlog']}</span></div>
+    <div class="stat-card sc-analysis"><span class="stat-lbl">Em Análise</span><span class="stat-val">${byS['analysis']}</span></div>
+    <div class="stat-card sc-progress"><span class="stat-lbl">Em Execução</span><span class="stat-val">${byS['in_progress']}</span></div>
+    <div class="stat-card sc-review"><span class="stat-lbl">Em Revisão</span><span class="stat-val">${byS['review']}</span></div>
+    <div class="stat-card sc-done"><span class="stat-lbl">Concluído</span><span class="stat-val">${byS['done']}</span></div>
+  </div>
+  <div class="prog-card">
+    <div class="prog-head">
+      <span class="prog-title">${monthLabel(key)}</span>
+      <div class="prog-stats"><span>${done} de ${total} concluídas</span><span class="prog-badge">${pct}%</span></div>
+    </div>
+    <div class="prog-track"><div class="prog-fill" style="width:${pct}%"></div></div>
+  </div>`;
+
+  html+=getView()==='kanban'?renderKanban(c,key,m):renderList(c,key,m);
+  el.innerHTML=html;
+  bindListeners(c,key);
+}
+
+function addMonthFromUI(cid){
+  const v=document.getElementById('mInp')?.value;
+  if(v)addMonth(cid,v);
+}
+
+// ══════════════════════════════════════════
+// LIST VIEW
+// ══════════════════════════════════════════
+function renderList(c,key,m){
+  const hide=!!state.hideDoneByClinic[c.id];
+  let h=`<div class="task-tb">
+    <span class="sec-lbl">Tarefas do Mês</span>
+    <label class="toggle-done"><input type="checkbox" id="chkHide" ${hide?'checked':''} onchange="toggleHideDone('${c.id}')"> Ocultar concluídas</label>
+  </div><div class="task-list">`;
+
+  const visible=m.tasks.filter(t=>!(hide&&(t.stage||'backlog')==='done'));
+  if(!visible.length){
+    h+=`<div class="empty-state" style="padding:28px;background:var(--panel);border:1px solid var(--border);border-radius:6px;">
+      ${total?`<div class="empty-icon">✅</div><div class="empty-title">Tudo concluído!</div>`:
+               `<div class="empty-icon">📋</div><div class="empty-title">Sem tarefas</div>Adicione abaixo.`}
+    </div>`;
+    h+=`</div>`;
+  } else {
+    visible.forEach(t=>{
+      const stg=t.stage||'backlog';
+      const subs=t.subtasks||[];
+      const subDone=subs.filter(s=>s.done).length;
+      const expanded=!!(state.expandedSubs||{})[t.id];
+      const prioClass={alta:'mb-prio-alta',media:'mb-prio-media',baixa:'mb-prio-baixa'}[t.priority]||'';
+      const atts=t.attachments||[];
+
+      // subtask mini progress dots (max 8)
+      const dotsHtml=subs.length?`<div class="sub-mini-bar">${subs.slice(0,8).map(s=>`<div class="sub-mini-dot ${s.done?'done-dot':'pend-dot'}"></div>`).join('')}</div>`:'';
+
+      h+=`<div class="task-row s-${stg}">
+        <div class="task-main-row">
+          <div class="stage-pill sp-${stg}" onclick="advanceStage('${c.id}','${key}','${t.id}')" title="Clique para avançar etapa">${sIcon(stg)} ${sLabel(stg)}</div>
+          <input type="text" class="task-name-inp" value="${esc(t.name)}" data-cid="${c.id}" data-key="${key}" data-tid="${t.id}" placeholder="Nome da tarefa">
+          <div class="task-meta">
+            ${t.priority?`<span class="meta-badge ${prioClass}">${{alta:'🔴 Alta',media:'🟡 Média',baixa:'🟢 Baixa'}[t.priority]}</span>`:''}
+            ${t.owner?`<span class="meta-badge mb-owner">👤 ${esc(t.owner)}</span>`:''}
+            ${t.due?`<span class="meta-badge mb-due">📅 ${t.due}</span>`:''}
+            ${dotsHtml}
+            ${subs.length?`<span class="subtask-toggle" onclick="toggleSubExpand('${t.id}')">${expanded?'▲':'▼'} ${subDone}/${subs.length}</span>`:''}
+          </div>
+          <div class="att-wrap">
+            ${atts.map(a=>`<div class="att-chip" data-attid="${a.id}" title="${esc(a.filename)} (${fmtBytes(a.size)})">
+              <span class="afn">📎 ${esc(a.filename)}</span>
+              <span class="arm" data-rmatt="${a.id}" data-cid="${c.id}" data-key="${key}" data-tid="${t.id}">✕</span>
+            </div>`).join('')}
+          </div>
+          <button class="btn-ghost" onclick="openModal('${c.id}','${key}','${t.id}')">✎</button>
+          <label class="attach-btn" title="Anexar">📎<input type="file" class="att-file-inp" data-cid="${c.id}" data-key="${key}" data-tid="${t.id}" style="display:none"></label>
+          <div class="task-del" data-deltask="${t.id}" data-cid="${c.id}" data-key="${key}" title="Remover">✕</div>
+        </div>`;
+
+      // subtasks section
+      if(subs.length||expanded){
+        h+=`<div class="subtask-section">
+          <div class="subtask-header">
+            <span class="subtask-lbl">Subtarefas</span>
+            <span class="subtask-prog">${subDone}/${subs.length} concluídas</span>
+          </div>
+          <div class="subtask-list">
+            ${subs.map(s=>`<div class="subtask-row ${s.done?'sub-done':''}">
+              <input type="checkbox" class="subtask-check" ${s.done?'checked':''} onchange="toggleSub('${c.id}','${key}','${t.id}','${s.id}')">
+              <input type="text" class="subtask-name" value="${esc(s.name)}" onchange="editSubName('${c.id}','${key}','${t.id}','${s.id}',this.value)" onblur="editSubName('${c.id}','${key}','${t.id}','${s.id}',this.value)" placeholder="Nome da subtarefa">
+              <span class="subtask-del" onclick="delSub('${c.id}','${key}','${t.id}','${s.id}')">✕</span>
+            </div>`).join('')}
+          </div>
+          <div class="subtask-add-row">
+            <input type="text" class="subtask-add-inp" data-sub-inp="${t.id}" placeholder="Nova subtarefa..." data-cid="${c.id}" data-key="${key}" data-tid="${t.id}">
+            <button class="subtask-add-btn" data-sub-btn="${t.id}" data-cid="${c.id}" data-key="${key}" data-tid="${t.id}">+ Adicionar</button>
+          </div>
+        </div>`;
+      } else {
+        // collapsed — show mini add if no subs
+        h+=`<div style="padding:4px 12px 8px 42px;">
+          <button class="subtask-toggle" style="font-size:11px;" onclick="toggleSubExpand('${t.id}')">+ Adicionar subtarefas</button>
+        </div>`;
+      }
+
+      h+=`</div>`;
+    });
+    h+=`</div>`;
+  }
+
+  h+=`<div class="add-task-sec"><div class="add-task-row">
+    <input type="text" id="addTaskInp" placeholder="Nova tarefa — ex: Calcular comissão de Ana">
+    <button class="btn" onclick="addTaskFromUI('${c.id}','${key}')">+ Adicionar</button>
+  </div></div>`;
+  return h;
+}
+
+function addTaskFromUI(cid,key){
+  const inp=document.getElementById('addTaskInp');
+  addTask(cid,key,(inp?.value||''));
+}
+
+// ══════════════════════════════════════════
+// KANBAN VIEW
+// ══════════════════════════════════════════
+function renderKanban(c,key,m){
+  let h=`<div class="kanban-board">`;
+  STAGES.forEach((stg,si)=>{
+    const cards=m.tasks.filter(t=>(t.stage||'backlog')===stg.id);
+    h+=`<div class="k-col">
+      <div class="k-col-hd kh-${stg.id}">
+        <span class="k-col-title">${stg.icon} ${stg.label}</span>
+        <span class="k-col-cnt">${cards.length}</span>
+      </div>
+      <div class="k-cards">
+        ${cards.length?cards.map(t=>{
+          const subs=t.subtasks||[];
+          const sd=subs.filter(s=>s.done).length;
+          const atts=t.attachments||[];
+          const prioIcon={alta:'🔴',media:'🟡',baixa:'🟢'}[t.priority]||'';
+          const dotsHtml=subs.length?`<div class="k-card-sub"><div class="sub-bar">${subs.slice(0,8).map(s=>`<div class="sb ${s.done?'sb-f':'sb-p'}"></div>`).join('')}</div><span>${sd}/${subs.length} sub</span></div>`:'';
+          return `<div class="k-card" ondblclick="openModal('${c.id}','${key}','${t.id}')">
+            <button class="k-card-del" onclick="delTask('${c.id}','${key}','${t.id}')">✕</button>
+            <div class="k-card-name">${prioIcon} ${esc(t.name)}</div>
+            ${dotsHtml}
+            ${t.owner||t.due?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px;">${t.owner?`<span style="font-size:10px;background:var(--brown-xlight);color:var(--brown-dark);padding:2px 6px;border-radius:3px;">👤${esc(t.owner)}</span>`:''}${t.due?`<span style="font-size:10px;color:var(--muted);">📅${t.due}</span>`:''}</div>`:''}
+            <div class="k-card-foot">
+              <span class="k-att">${atts.length?'📎 '+atts.length:''}</span>
+              <div class="k-btns">
+                ${si>0?`<button class="k-mbtn" onclick="moveStage('${c.id}','${key}','${t.id}',-1)" title="Voltar">←</button>`:''}
+                ${si<STAGES.length-1?`<button class="k-mbtn" onclick="moveStage('${c.id}','${key}','${t.id}',1)" title="Avançar">→</button>`:''}
+                <button class="k-mbtn" onclick="openModal('${c.id}','${key}','${t.id}')" title="Detalhes">✎</button>
+              </div>
+            </div>
+          </div>`;
+        }).join(''):`<div class="k-empty">Sem tarefas</div>`}
+      </div>
+      <button class="k-add-btn" onclick="kanbanAdd('${c.id}','${key}','${stg.id}')">+ Adicionar tarefa</button>
+    </div>`;
+  });
+  return h+`</div>`;
+}
+
+function kanbanAdd(cid,key,stageId){
+  const name=prompt(`Nova tarefa em "${sLabel(stageId)}":`);
+  if(name&&name.trim())addTask(cid,key,name.trim(),stageId);
+}
+
+// ══════════════════════════════════════════
+// LISTENERS (delegados no panel)
+// ══════════════════════════════════════════
+function bindListeners(c,key){
+  // task name edit
+  document.querySelectorAll('.task-name-inp').forEach(inp=>{
+    inp.addEventListener('change',()=>editTaskName(inp.dataset.cid,inp.dataset.key,inp.dataset.tid,inp.value));
+  });
+  // add task enter
+  const addInp=document.getElementById('addTaskInp');
+  if(addInp)addInp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addTaskFromUI(c.id,key);}});
+  // attach file
+  document.querySelectorAll('.att-file-inp').forEach(inp=>{
+    inp.addEventListener('change',async()=>{
+      if(!inp.files||!inp.files[0])return;
+      await attachFile(inp.dataset.cid,inp.dataset.key,inp.dataset.tid,inp.files[0]);
+      saveState();render();
+    });
+  });
+  // att open
+  document.querySelectorAll('.att-chip').forEach(chip=>{
+    chip.onclick=e=>{
+      const rm=e.target.closest('[data-rmatt]');
+      if(rm){e.stopPropagation();removeAtt(rm.dataset.cid,rm.dataset.key,rm.dataset.tid,rm.dataset.rmatt);render();return;}
+      openAtt(chip.dataset.attid);
+    };
+  });
+  // del task
+  document.querySelectorAll('[data-deltask]').forEach(btn=>{
+    btn.onclick=()=>delTask(btn.dataset.cid,btn.dataset.key,btn.dataset.deltask);
+  });
+  // subtask add btn
+  document.querySelectorAll('[data-sub-btn]').forEach(btn=>{
+    btn.onclick=()=>{
+      const inp=document.querySelector(`[data-sub-inp="${btn.dataset['sub-btn']||btn.dataset.subBtn}"]`)||
+                document.querySelector(`input[data-tid="${btn.dataset.tid}"].subtask-add-inp`);
+      if(inp)addSub(btn.dataset.cid,btn.dataset.key,btn.dataset.tid,inp.value);
+      if(inp)inp.value='';
+    };
+  });
+  // subtask add enter
+  document.querySelectorAll('.subtask-add-inp').forEach(inp=>{
+    inp.addEventListener('keydown',e=>{
+      if(e.key==='Enter'){e.preventDefault();addSub(inp.dataset.cid,inp.dataset.key,inp.dataset.tid,inp.value);inp.value='';}
+    });
+  });
+  // month select
+  const msel=document.getElementById('mSel');
+  if(msel)msel.onchange=()=>selMonth(c.id,msel.value);
+}
+
+// ══════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════
+openDB().then(()=>render()).catch(()=>render());
